@@ -1,77 +1,35 @@
-# Copyright 2021 by Cybryant 
-#
-# This is a testing file, DO NOT use it.
-
-global resp_table: table[addr] of count = table();
-global f0f_table: table[addr] of count = table();
-global url_table: table[addr] of set[string] = table();
-global orig_addr: set[addr];
-global cur_time: time = current_time();
-global start_time: time = current_time();
-global inter: interval = 0sec;
-global used_time:interval = current_time() - cur_time;
-
-event zeek_init(){}
-
 event http_reply(c: connection, version: string, code: count, reason: string)
 {
-    local url = to_lower(c$http$host + c$http$uri);
-    inter += current_time() - cur_time;
-    cur_time = current_time();
-    if(!(c$id$orig_h in resp_table))
-    {
-        add orig_addr[c$id$orig_h];
-        resp_table[c$id$orig_h] = 1;
+	if(code == 404)
+	{
+		SumStats::observe("http_response_404", 
+    	  SumStats::Key($host = c$id$orig_h), 
+    	  SumStats::Observation($str=c$http$uri));
+	}
 
-        url_table[c$id$orig_h] = set(url);
+	SumStats::observe("http_response", 
+	  SumStats::Key($host = c$id$orig_h), 
+	  SumStats::Observation($str=c$http$uri));
 
-        if(code == 404)
-        {
-            f0f_table[c$id$orig_h] = 1;
-        }
-        else
-        {
-            f0f_table[c$id$orig_h] = 0;
-        }
-    }
-    else
-    {    
-        if(!(to_lower(c$http$uri) in url_table[c$id$orig_h]))
-        {
-            add url_table[c$id$orig_h][c$http$uri];
-        }
-        resp_table[c$id$orig_h] += 1;
-        if(code == 404)
-        {
-            f0f_table[c$id$orig_h] += 1;
-        }
-   }
-    if(inter >= 10min)
-    {
-        for(i in orig_addr)
-        {
-            if(f0f_table[i] > 2)
-            {
-                if(f0f_table[i] / resp_table[i] > 0.2)
-                {
-                    if(|url_table[i]| / f0f_table[i] > 0.5)
-                    {
-                        print(addr_to_uri(i) + " is a scanner with ");
-                        print(|url_table[i]|);
-                        print(" scan attempts on ");
-                        print(|f0f_table[i]|);
-                        print(" urls. ");
-                    }
-                }
-            }
-        }
-        inter = 0sec;
-    }
 }
 
-event zeek_done()
+event zeek_init()
 {
-    inter = current_time() - start_time;
-    print("Interval:");
-    print(inter);
+
+	local reducer1 = SumStats::Reducer($stream="http_response_404", 
+                                 $apply=set(SumStats::SUM, SumStats::UNIQUE));
+	local reducer2 = SumStats::Reducer($stream="http_response", 
+                             $apply=set(SumStats::SUM));
+                                 
+    SumStats::create([$name = "find_scaner",
+                    	$epoch = 10min,
+                    	$reducers = set(reducer1, reducer2),
+						$epoch_result(ts: time, key: SumStats::Key, result: SumStats::Result) =
+						{
+						local r1 = result["http_response_404"];
+						local r2 = result["http_response"];
+						if(r1$sum > 2 && (r1$unique / r1$sum) > 0.5 && (r1$sum / r2$sum) > 0.2)
+						print fmt("%s is a scanner with %d scan attemps on %d urls", 
+									key$host, r1$sum, r1$unique);
+						}]);
 }
